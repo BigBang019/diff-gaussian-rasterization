@@ -38,11 +38,23 @@ __device__ const float SH_C3[] = {
 	-0.5900435899266435f
 };
 
+/**
+ * 把NDC (Normalized Device Coordinates)坐标转化为像素坐标
+ * 转化前：v \in [-1, 1]
+ * 转化后：((v + 1.0) * S - 1.0) * 0.5 \in [-1/2, S-1/2]
+ */
 __forceinline__ __device__ float ndc2Pix(float v, int S)
 {
 	return ((v + 1.0) * S - 1.0) * 0.5;
 }
 
+/**
+ * 首先点p在当前image plane的影响范围是一个矩形，
+ * 这个函数希望计算这个矩形会影响多少个block
+ * @param grid     [R] =((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1)描述的是有多少个block
+ * @param rect_min [W] 坐标最小的block idx (x,y)
+ * @param rect_max [W] 坐标最大的block idx (x,y)
+ */
 __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
 {
 	rect_min = {
@@ -136,6 +148,14 @@ __forceinline__ __device__ float sigmoid(float x)
 	return 1.0f / (1.0f + expf(-x));
 }
 
+/**
+ * 并行处理orig_points里的第idx个点，检验他是不是在当前视锥体里：
+ * 先从world-coordinate转化到camera-coordinate，如果点离相机太近（z<0.2），就判定不在。
+ * @param idx
+ * @param orig_points (N, 3) 原点集
+ * @param viewmatrix (4, 3) 相机坐标矩阵
+ * @param projmatrix
+ */
 __forceinline__ __device__ bool in_frustum(int idx,
 	const float* orig_points,
 	const float* viewmatrix,

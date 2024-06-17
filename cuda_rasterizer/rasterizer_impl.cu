@@ -67,6 +67,17 @@ __global__ void checkFrustum(int P,
 
 // Generates one key/value pair for all Gaussian / tile overlaps. 
 // Run once per Gaussian (1:N mapping).
+/**
+ * 构建映射：gaussian_keys_unsorted -> gaussian_values_unsorted
+ * @param P                        [R] number of points
+ * @param points_xy                [R] 点投影在image plane上的pixel index
+ * @param depths                   [R] 点在camera coordinate下的z值，表示深度信息，可以用来表达点与点的前后关系
+ * @param offsets                  [R] 影响矩形的面积的累加和
+ * @param gaussian_keys_unsorted   [W] keys: 高32bit标记当前点影响哪个block，低32bit标记当前点的depth信息
+ * @param gaussian_values_unsorted [W] values：标记当前点的idx
+ * @param radii                    [R] 高斯投影在image plane影响的最大范围
+ * @param grid                     [R] grid=((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1)
+ */
 __global__ void duplicateWithKeys(
 	int P,
 	const float2* points_xy,
@@ -113,6 +124,14 @@ __global__ void duplicateWithKeys(
 // Check keys to see if it is at the start/end of one tile's range in 
 // the full sorted list. If yes, write start/end of this tile. 
 // Run once per instanced (duplicated) Gaussian ID.
+/**
+ * 统计image plane的pixel被哪些射线影响。
+ * point_list_keys记录射线keys
+ * 统计结果的存在ranges里，ranges的idx意义是image plane的pixel坐标，value的意义是射线的idx范围[x,y)
+ * @param L               [R] 点-block的影响关系总数
+ * @param point_list_keys [R] ascending排序过后的keys
+ * @param ranges          [W] idx为block id，记录当前block被point_list_keys的哪些射线影响：[x,y)
+ */
 __global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* ranges)
 {
 	auto idx = cg::this_grid().thread_rank();
@@ -195,6 +214,36 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 
 // Forward rendering procedure for differentiable rasterization
 // of Gaussians.
+/**
+ *
+ * @param geometryBuffer resize function of geometryBuffer
+ * @param binningBuffer  resize function of binningBuffer
+ * @param imageBuffer    resize function of imageBuffer
+ * @param P              [R] number of points
+ * @param D              [R] maximum spherical harmonic degree
+ * @param M              [R] number of spherical coefficients
+ * @param background     [R] (3, )
+ * @param width          [R] image width
+ * @param height         [R] image height
+ * @param means3D        [R] (P, 3) original point set
+ * @param shs            [R] (P, 1, 3) spherical harmonic coefficients
+ * @param colors_precomp [R] (0) or ?
+ * @param opacities      [R] (P, 1)
+ * @param scales         [R] (P, 3)
+ * @param scale_modifier
+ * @param rotations      [R] (P, 4)
+ * @param cov3D_precomp  [R] (0) or ?
+ * @param viewmatrix     [R] (4, 4) 旋转矩阵，从world coordinate转化到camera coordinate
+ * @param projmatrix     [R] (4, 4) 投影矩阵，从world coordinate转化到image plane上
+ * @param cam_pos        [R] (3, )
+ * @param tan_fovx
+ * @param tan_fovy
+ * @param prefiltered
+ * @param out_color      (3, H, W)
+ * @param out_depth      (2, H, W)
+ * @param radii          (P, )
+ * @return
+ */
 int CudaRasterizer::Rasterizer::forward(
 	std::function<char* (size_t)> geometryBuffer,
 	std::function<char* (size_t)> binningBuffer,
@@ -340,6 +389,43 @@ int CudaRasterizer::Rasterizer::forward(
 
 // Produce necessary gradients for optimization, corresponding
 // to forward render pass
+/**
+ *
+ * @param P              [R] number of points
+ * @param D              [R] maximum spherical harmonic degree
+ * @param M              [R] number of spherical coefficients
+ * @param R              [R] num_rendered
+ * @param background     [R]
+ * @param width          [R] image width
+ * @param height         [R] image height
+ * @param means3D        [R] (P, 3) original point set
+ * @param shs            [R] (P, 1, 3) spherical harmonic coefficients
+ * @param colors_precomp [R]
+ * @param scales         [R] (P, 3)
+ * @param scale_modifier [R]
+ * @param rotations      [R] (P, 4)
+ * @param cov3D_precomp  [R]
+ * @param viewmatrix     [R] (4, 4) 旋转矩阵，从world coordinate转化到camera coordinate
+ * @param projmatrix     [R] (4, 4) 投影矩阵，从world coordinate转化到image plane上
+ * @param campos         [R] (3, )
+ * @param tan_fovx
+ * @param tan_fovy
+ * @param radii          [R] 高斯投影在image plane影响的最大半径
+ * @param geom_buffer    [R]
+ * @param binning_buffer [R]
+ * @param img_buffer     [R]
+ * @param dL_dpix        [W]
+ * @param dL_depths      [W]
+ * @param dL_dmean2D     [W] (P, 3)
+ * @param dL_dconic      [W] (P, 2, 2)
+ * @param dL_dopacity    [W] (P, 1)
+ * @param dL_dcolor      [W] (P, 3)
+ * @param dL_dmean3D     [W] (P, 3)
+ * @param dL_dcov3D      [W] (P, 6)
+ * @param dL_dsh         [W] (P, M, 3)
+ * @param dL_dscale      [W] (P, 3)
+ * @param dL_drot        [W] (P, 4)
+ */
 void CudaRasterizer::Rasterizer::backward(
 	const int P, int D, int M, int R,
 	const float* background,

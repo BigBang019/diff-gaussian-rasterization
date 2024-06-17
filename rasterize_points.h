@@ -14,7 +14,29 @@
 #include <cstdio>
 #include <tuple>
 #include <string>
-	
+
+/**
+ *
+ * @param background    (3, )
+ * @param means3D       (P, 3)
+ * @param colors        (0) or ?
+ * @param opacity       (P, 1)
+ * @param scales        (P, 3)
+ * @param rotations     (P, 4)
+ * @param scale_modifier
+ * @param cov3D_precomp (0) or ?
+ * @param viewmatrix    (4, 4)
+ * @param projmatrix    (4, 4)
+ * @param tan_fovx
+ * @param tan_fovy
+ * @param image_height
+ * @param image_width
+ * @param sh            (P, 1, 3)
+ * @param degree
+ * @param campos        (3, )
+ * @param prefiltered
+ * @return
+ */
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
@@ -36,6 +58,31 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered);
 
+/**
+ *
+ * @param background     (3, )
+ * @param means3D        (P, 3)
+ * @param radii          (P, )
+ * @param colors         (0) or ?
+ * @param scales         (P, 3)
+ * @param rotations      (P, 4)
+ * @param scale_modifier
+ * @param cov3D_precomp  (0) or ?
+ * @param viewmatrix     (4, 4)
+ * @param projmatrix     (4, 4)
+ * @param tan_fovx
+ * @param tan_fovy
+ * @param dL_dout_color  [W]
+ * @param dL_dout_depth  [W]
+ * @param sh             (P, 1, 3)
+ * @param degree         ()
+ * @param campos         (3, )
+ * @param geomBuffer
+ * @param R              num_rendered
+ * @param binningBuffer
+ * @param imageBuffer
+ * @return
+ */
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeGaussiansBackwardCUDA(
  	const torch::Tensor& background,

@@ -17,6 +17,18 @@ namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
 // coefficients of each Gaussian to a simple RGB color.
+/**
+ * 计算一个点在不同方向上的颜色f(\theta, \phi)，其中f(\theta, \phi)为Spherical Harmonic Vector的线性组合
+ * 当0阶时，f(\theta, \phi)为常数，也就是说点在各个方向上的颜色相同
+ * @param idx
+ * @param deg        选择的球谐函数的最大阶数
+ * @param max_coeffs 球谐系数的数目=shs.shape[1]
+ * @param means      (P, 3) 点集
+ * @param campos     (3, ) 相机位置
+ * @param shs        (P, 1, 3)
+ * @param clamped    标记(r,g,b)哪个结果<0
+ * @return
+ */
 __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
 {
 	// The implementation is loosely based on code for 
@@ -71,6 +83,18 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 }
 
 // Forward version of 2D covariance matrix computation
+/**
+ * 求解3D covariance matrix在2D image plane上的投影：2D covariance matrix
+ * \Sigma' = J \cdot W \cdot \Sigma \cdot W^T \cdot J^T
+ * @param mean
+ * @param focal_x
+ * @param focal_y
+ * @param tan_fovx
+ * @param tan_fovy
+ * @param cov3D
+ * @param viewmatrix
+ * @return
+ */
 __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
 {
 	// The following models the steps outlined by equations 29
@@ -115,6 +139,13 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 // Forward method for converting scale and rotation properties of each
 // Gaussian to a 3D covariance matrix in world space. Also takes care
 // of quaternion normalization.
+/**
+ * Covariance Matrix Sigma = (SR)^T \cdot (SR)
+ * @param scale (3, )
+ * @param mod   scale_modifier
+ * @param rot   (4, )
+ * @param cov3D (6, )
+ */
 __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 rot, float* cov3D)
 {
 	// Create scaling matrix
@@ -152,6 +183,42 @@ __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 r
 }
 
 // Perform initial steps for each Gaussian prior to rasterization.
+/**
+ * 1. 计算3D covariance matrix
+ * 2. 计算2D covariance matrix和它的inverse
+ * 3. 计算投影以后的影响矩阵
+ * 4. 从Spherical harmonic coefficients计算点的rgb
+ * @param P               [R] number of points
+ * @param D               [R] maximum spherical harmonic degree
+ * @param M               [R] number of spherical coefficients
+ * @param orig_points     [R] (P, 3) original point set
+ * @param scales          [R] (P, 3)
+ * @param scale_modifier  [R]
+ * @param rotations       [R] (P, 4)
+ * @param opacities       [R] (P, 1)
+ * @param shs             [R] (P, 1, 3) spherical harmonic coefficients
+ * @param clamped         [W]
+ * @param cov3D_precomp   [R] (0) or ?
+ * @param colors_precomp  [R] (0) or ?
+ * @param viewmatrix      [R] (4, 4) 旋转矩阵，从world coordinate转化到camera coordinate
+ * @param projmatrix      [R] (4, 4) 投影矩阵，从world coordinate转化到image plane上
+ * @param cam_pos         [R] (3, )
+ * @param W               [R] image width
+ * @param H               [R] image height
+ * @param focal_x         [R]
+ * @param focal_y         [R]
+ * @param tan_fovx        [R]
+ * @param tan_fovy        [R]
+ * @param radii           [W] 高斯投影在image plane影响的最大半径
+ * @param points_xy_image [W] 点投影在image plane上的pixel index
+ * @param depths          [W] 点在camera coordinate下的z值，表示深度信息，可以用来表达点与点的前后关系
+ * @param cov3Ds          [W] 3D covariance matrix
+ * @param rgb             [W] 点的RGB
+ * @param conic_opacity   [W] the inverse of 2D covariance matrix
+ * @param grid            [W]
+ * @param tiles_touched   [W] 在image plane上影响矩形的面积
+ * @param prefiltered
+ */
 template<int C>
 __global__ void preprocessCUDA(int P, int D, int M,
 	const float* orig_points,
@@ -258,6 +325,41 @@ __global__ void preprocessCUDA(int P, int D, int M,
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
 // and rasterizing data.
+/**
+ * 图片rendering并发的切分方案如下
+ * (0,0)-------------------------------------------|
+ *   |                                             |
+ *   |        <pixel_min>----------|               |
+ *   |             |               |               |
+ *   |             |     BLOCK     |               |
+ *   |             |               |               |
+ *   |             |----------<pixel_max>          |
+ *   |                                             |
+ *   |                                             |
+ *   |                                             |
+ *   |                                             |
+ *   |                                             |
+ *   |-----------------------------------------(H-1,W-1)
+ *
+ * grid = ((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1)，表述block的结构
+ * block = (BLOCK_X, BLOCK_Y)，表示thread的结构
+ *
+ * 一个thread计算一个pixel的结果
+ *
+ * @param ranges          [R] idx为block id，记录当前block被point_list_keys的哪些射线影响：[x,y)
+ * @param point_list      [R]
+ * @param W               [R]
+ * @param H               [R]
+ * @param points_xy_image [R] 点投影在image plane上的pixel index
+ * @param features        [R] 点的rgb
+ * @param depths          [R] 点在camera coordinate下的z值，表示深度信息，可以用来表达点与点的前后关系
+ * @param conic_opacity   [R] the inverse of 2D covariance matrix, opacity
+ * @param final_T         [W]
+ * @param n_contrib       [W]
+ * @param bg_color        [R]
+ * @param out_color
+ * @param out_depth
+ */
 template <uint32_t CHANNELS>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
@@ -289,6 +391,10 @@ renderCUDA(
 	bool done = !inside;
 
 	// Load start/end range of IDs to process in bit sorted list.
+    /**
+     * 当前block的当前thread要处理第pix_id的pixel
+     * range获得当前block被point_list_keys的哪些点影响
+     */
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
 	int toDo = range.y - range.x;
@@ -307,6 +413,14 @@ renderCUDA(
 	// float A = { 0 };
 
 	// Iterate over batches until all done or range is complete
+    /**
+     * i表示轮数，
+     * 每一轮一个长度为BLOCK_SIZE的滑动窗口都会在point_list上移动，移动步长为BLOCK_SIZE
+     * 当前thread会统计所在窗口里的所有点对当前pixel做出的贡献
+     *
+     * [工程上] 每个thread会从当前窗口取用一个待处理的point填到共用内存collected_id、collected_xy、collected_conic_opacity里
+     * [工程上] 以此来减少内存读取
+     */
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
 		// End if entire block votes that it is done rasterizing
@@ -386,10 +500,28 @@ renderCUDA(
 		// {
 		// 	out_depth[pix_id] = -1.0f;
 		// }
-		
+
 	}
 }
 
+/**
+ *
+ * @param grid          [R] =((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1)
+ * @param block         [R] =(BLOCK_X, BLOCK_Y)
+ * @param ranges        [R]
+ * @param point_list    [R]
+ * @param W             [R]
+ * @param H             [R]
+ * @param means2D       [R]
+ * @param colors        [R]
+ * @param depths        [R]
+ * @param conic_opacity [R]
+ * @param final_T       [W]
+ * @param n_contrib     [W]
+ * @param bg_color      [R]
+ * @param out_color
+ * @param out_depth
+ */
 void FORWARD::render(
 	const dim3 grid, dim3 block,
 	const uint2* ranges,
@@ -420,6 +552,42 @@ void FORWARD::render(
 		out_depth);
 }
 
+/**
+ * 1. 计算3D covariance matrix
+ * 2. 计算2D covariance matrix和它的inverse
+ * 3. 计算投影以后的影响矩阵
+ * 4. 从Spherical harmonic coefficients计算点的rgb
+ * @param P               [R] number of points
+ * @param D               [R] maximum spherical harmonic degree
+ * @param M               [R] number of spherical coefficients
+ * @param orig_points     [R] (P, 3) original point set
+ * @param scales          [R] (P, 3)
+ * @param scale_modifier  [R]
+ * @param rotations       [R] (P, 4)
+ * @param opacities       [R] (P, 1)
+ * @param shs             [R] (P, 1, 3) spherical harmonic coefficients
+ * @param clamped         [W]
+ * @param cov3D_precomp   [R] (0) or ?
+ * @param colors_precomp  [R] (0) or ?
+ * @param viewmatrix      [R] (4, 4) 旋转矩阵，从world coordinate转化到camera coordinate
+ * @param projmatrix      [R] (4, 4) 投影矩阵，从world coordinate转化到image plane上
+ * @param cam_pos         [R] (3, )
+ * @param W               [R] image width
+ * @param H               [R] image height
+ * @param focal_x         [R]
+ * @param focal_y         [R]
+ * @param tan_fovx        [R]
+ * @param tan_fovy        [R]
+ * @param radii           [W] 高斯投影在image plane影响的最大范围
+ * @param means2D         [W] 点投影在image plane上的pixel index
+ * @param depths          [W]
+ * @param cov3Ds          [W] 3D covariance matrix
+ * @param colors          [W] 点的RGB
+ * @param conic_opacity   [W] the inverse of 2D covariance matrix, opacity
+ * @param grid            [W]
+ * @param tiles_touched   [W]
+ * @param prefiltered
+ */
 void FORWARD::preprocess(int P, int D, int M,
 	const float* means3D,
 	const glm::vec3* scales,
